@@ -19,24 +19,6 @@
 #include "kernel.h"
 
 /*================================================================*
- *    Constant Declarations                                       *
- *================================================================*/
-
-#define RUNNING 0                                                   /* max of one process can have this status */
-#define READY   1                                                   /* starting status of processes */
-#define BLOCKED 2                                                   /* status of blocked process */
-#define ZAPPED  3                                                   /* status of zapped process, not yet quit */
-#define QUIT    4
-#define FINISHED 5
-#define UNUSED -1
-#define TIMESLICE 80000
-
-#define TRUE    1
-#define FALSE   0
-
-#define DEBUG FALSE
-
-/*================================================================*
  *    Function Prototypes                                         *
  *================================================================*/
 int sentinel(void *);
@@ -44,6 +26,7 @@ extern int start1(void *);
 void dispatcher(void);
 void launch();
 void dump_processes();
+void quit(int status);
 
 static void check_kernel_mode(char *caller_name);
 static void enable_interrupts(char* caller_name);
@@ -69,7 +52,7 @@ static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc
  *    Global Variable Declarations                                *
  *================================================================*/
 /* Patrick's Debugging Global Variable... */
-int debugflag = 1;
+int debugflag = 0;
 
 /* Process Table */
 proc_struct ProcTable[MAXPROC];
@@ -159,6 +142,7 @@ void startup()
 
    dispatcher();
 
+
    console(" - startup(): Should not see this message! -\n");
    console(" - Returned from fork1 call that created start1 -\n");
 
@@ -198,9 +182,13 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    disable_interrupts("fork1");
 
  /* find an empty slot in the process table */
-   proc_slot = 1;
+   proc_slot = next_pid%MAXPROC;
    while( (ProcTable[proc_slot].pid !=  -1) && (proc_slot < MAXPROC) )
-      proc_slot += 1;
+   {
+       next_pid++;
+       proc_slot = next_pid%MAXPROC;
+   }
+
 
  /* return if stack size is too small */
    if (stacksize < USLOSS_MIN_STACK)
@@ -221,15 +209,15 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
       return (-1);
    }
 
-   if (strcmp(name, "sentinel") )                                   /* checks if process is sentinel */
+   if (strcmp(name, "sentinel") == 1)                                   /* checks if process is sentinel */
    {
-      if ( (priority > MINPRIORITY) || (priority < MAXPRIORITY) )   /* if not checks if priority is in range */
-      {
-       /* enable interrupts */
-         enable_interrupts("fork1");
-         console(" - fork1(): priority out of range -\n");
-         return (-1);
-      }
+       if ( (priority > MINPRIORITY) || (priority < MAXPRIORITY) )   /* if not checks if priority is in range */
+       {
+        /* enable interrupts */
+          enable_interrupts("fork1");
+          console(" - fork1(): priority out of range -\n");
+          return (-1);
+       }
    }
 
    if (func == NULL)                                                /* checks if func NULL */
@@ -255,7 +243,6 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
       halt(1);
    }
    strcpy(ProcTable[proc_slot].name, name);                         /* stores the process name */
-
    ProcTable[proc_slot].start_func = func;                          /* stores the function to be executed */
 
    if (arg == NULL)                                                 /* checks if the function argument is empty */
@@ -271,26 +258,28 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    ProcTable[proc_slot].stacksize = stacksize;                      /* stores the stack size */
 
    ProcTable[proc_slot].pid = next_pid;                             /* stores the process id */
-   next_pid += 1;                                                   /* increments the next_pid */
+   next_pid++;                                                   /* increments the next_pid */
 
-   if(Current != NULL)                                              /* stores the parent process id */
-      ProcTable[proc_slot].parent_pid = Current->pid;
+   if(Current != NULL && strcmp(name, "sentinel") && strcmp(name, "start1"))
+   {
+         ProcTable[proc_slot].parent_pid = Current->pid;
+   }                                             /* stores the parent process id */
    else
-      ProcTable[proc_slot].parent_pid = 0;
+   {
+       ProcTable[proc_slot].parent_pid = -2;
+   }
 
    ProcTable[proc_slot].num_child  = 0;
 
-   ProcTable[proc_slot].status = READY;                             /* sets the process status to ready */
+   ProcTable[proc_slot].priority = priority;
+   ProcTable[proc_slot].status = READY;                     /* sets the process priority */
 
-   ProcTable[proc_slot].priority = priority;                        /* sets the process priority */
-
-   ProcTable[proc_slot].stack = (char *)(malloc (stacksize) );      /* allocates and stores the stack */
+   ProcTable[proc_slot].stack = (char *)(malloc (stacksize));      /* allocates and stores the stack */
 
  /* initialize context for this process, but use launch function
   * pointer for the initial value of the process's program
   * counter (PC) */
    context_init(&(ProcTable[proc_slot].state), psr_get(), ProcTable[proc_slot].stack, ProcTable[proc_slot].stacksize, launch);
-
  /* updates the ReadyList */
    ready_temp = ReadyList[priority];
 
@@ -305,26 +294,24 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
       ready_temp = &ProcTable[proc_slot];
    }
 
- /* updates Current */
-   if (Current != NULL)
-   {
-      Current->child_proc_ptr = &ProcTable[proc_slot];
-      Current->num_child += 1;
-   }
-
+   /* updates Current */
+     if (Current != NULL)
+     {
+        Current->child_proc_ptr = &ProcTable[proc_slot];
+        Current->num_child += 1;
+    }
  /* for future phase(s) */
    p1_fork(ProcTable[proc_slot].pid);
 
  /* calls dispatcher if not sentinel */
-   if (strcmp(name, "sentinel") )
+   if (strcmp(name, "sentinel"))
       dispatcher();
 
  /* enable interrupts */
    enable_interrupts("fork1");
 
  /* updates Process Number */
-   NumProc += 1;
-
+   NumProc++;
    return (ProcTable[proc_slot].pid);
 }/* fork1 */
 
@@ -346,6 +333,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
 int join(int *code)
 {
    int child_pid = -1;
+   int quit_pid;
    proc_ptr join_temp;
 
    if (DEBUG && debugflag)
@@ -356,6 +344,7 @@ int join(int *code)
 
  /* disbale interrupts */
    disable_interrupts("join");
+   console("here\n");
 
  /* check if current process has children */
    if (!Current->num_child)
@@ -375,31 +364,60 @@ int join(int *code)
       return (-1);
    }
 
+    if(Current->quit_child_ptr != NULL)
+    {
+        console("in if\n");
+        proc_ptr quit = Current->quit_child_ptr;
+
+        Current->quit_child_ptr = quit->quit_child_ptr;
+
+        *code = quit->quit_code;
+        quit_pid = quit->pid;
+
+        quit->pid = -1;
+        quit->next_proc_ptr = NULL;
+        quit->next_sibling_ptr = NULL;
+        quit->quit_child_ptr = NULL;
+        quit->start_arg[0] = '\0';
+        quit->parent_pid = -1;
+        quit->priority = -1;
+        quit->start_func = NULL;
+        quit->stacksize = -1;
+        quit->num_child = 0;
+
+        ZappedList = NULL;
+
+        return quit_pid;
+    }
+
+    Current->status = BLOCKED;
+    dispatcher();
+
  /* check if current process has children in QuitList */
 
    //join_temp = Current->child_proc_ptr;
-   while (child_pid == -1)                                          /* sets up loop to check for child forever */
+   /*while (child_pid == -1)
    {
       join_temp = Current->child_proc_ptr;
-      while (join_temp != NULL)                                     /* checks if any child has quit */
+      while (join_temp != NULL)
       {
          if(join_temp->status == QUIT)
             child_pid = join_temp->pid;
          join_temp = join_temp->next_sibling_ptr;
       }
-      if (child_pid == -1)                                          /* if no child has quit blocks process and calls dispatcher */
+      if (child_pid == -1)
       {
          Current->status = BLOCKED;
          dispatcher();
       }
-   }
+  }*/
 
  /* stores passed quit code */
-   *code = find_process(child_pid)->quit_code;
+   //*code = find_process(child_pid)->quit_code;
 
  /* enable interrupts */
    enable_interrupts("join");
-   return child_pid;
+   return quit_pid;
 }/* join */
 
 
@@ -435,14 +453,46 @@ void quit(int status)
 
  /* sets status of current process to quit */
    Current->status = QUIT;
+   Current->quit_code = status;
 
+   ReadyList[Current->priority-1] = NULL;
  /* deals with the parent process */
-   if (Current->parent_pid)
+
+   proc_ptr parent_ptr = find_process(Current->parent_pid);
+   if (Current->parent_pid != -1)
    {
-      proc_ptr parent_ptr = find_process(Current->parent_pid);
       parent_ptr->num_child -= 1;
+
+      if(parent_ptr->status == BLOCKED)
+      {
+          parent_ptr->status = READY;
+          ReadyList[parent_ptr->priority-1] = parent_ptr;
+      }
    }
 
+   proc_ptr next_free;
+   for(next_free = parent_ptr; next_free->quit_child_ptr != NULL; next_free = next_free->quit_child_ptr)
+   {
+       ;
+   }
+   next_free->quit_child_ptr = Current;
+
+   if(Current->parent_pid == -1)
+   {
+       console("here\n");
+       proc_ptr quit = Current->quit_child_ptr;
+       quit->pid = -1;
+       quit->next_proc_ptr = NULL;
+       quit->next_sibling_ptr = NULL;
+       quit->start_arg[0] = '\0';
+       quit->parent_pid = -1;
+       quit->priority = -1;
+       quit->start_func = NULL;
+       quit->stacksize = -1;
+       quit->num_child = 0;
+
+       ZappedList = NULL;
+   }
  /* for future phase(s) */
    p1_quit(Current->pid);
 
@@ -596,7 +646,7 @@ void dispatcher(void)
  /* disbale interrupts */
    disable_interrupts("dispatcher");
 
-   purge_ready("dispatcher");
+   //purge_ready("dispatcher");
 
    if (DEBUG && debugflag)
       dump_processes();
@@ -619,7 +669,6 @@ void dispatcher(void)
       {
          BlockedList->status = READY;
          next_process = BlockedList;
-         //next_process->status = READY;
          BlockedList = BlockedList->next_proc_ptr;
 
        /* updates the ReadyList */
@@ -642,6 +691,7 @@ void dispatcher(void)
 
    }
 
+
    if (DEBUG && debugflag)
       dump_processes();
 
@@ -649,7 +699,7 @@ void dispatcher(void)
    if (Current == NULL)                                             /* First time Current is NULL */
    {
     /* for future phase(s) */
-      p1_switch(0, next_process->pid);
+      p1_switch(-1, next_process->pid);
       Current = next_process;
       context_switch( NULL, &next_process->state);
    }
@@ -663,8 +713,11 @@ void dispatcher(void)
       context_switch( &prev_process->state, &Current->state);
    }
 
+   Current->status = RUNNING;
  /* enable interrupts */
+
    enable_interrupts("dispatcher");
+   context_switch( &prev_process->state, &Current->state);
 
 } /* dispatcher */
 
@@ -685,7 +738,7 @@ void dump_processes()
       console("    - dump_processes(): called -\n");
 
    int i;
-   char* status[5] = {"RUNNING", "READY", "BLOCKED", "ZAPPED", "QUIT"};
+   char* status[6] = {'\0',"READY", "RUNNING", "BLOCKED","ZAPPED", "QUIT"};
 
    if (DEBUG && debugflag)
       console("    - dump_processes(): generating process list -\n");
@@ -745,11 +798,11 @@ static void purge_ready(char *caller_name)
       {
          prev_ptr = found_ptr;
          found_ptr = prev_ptr->next_proc_ptr;
-         if(prev_ptr->status == READY)                              /* checks if the list head is ready */
+         if(prev_ptr->status == READY && prev_ptr->status != RUNNING)                              /* checks if the list head is ready */
          {
             while (found_ptr != NULL)
             {
-               if (found_ptr->status != READY)                      /* loops through all members and chekc if ready */
+               if (found_ptr->status != READY && found_ptr->status != RUNNING)                      /* loops through all members and chekc if ready */
                {
                   purge_ready_helper(&block_ptr, &quit_ptr, &ready_ptr, &zapped_ptr, found_ptr);
                   prev_ptr->next_proc_ptr = found_ptr->next_proc_ptr;
@@ -759,11 +812,13 @@ static void purge_ready(char *caller_name)
                found_ptr = prev_ptr->next_proc_ptr;
             }
          }
-         else                                                       /* deals with the case where head is not ready */
+         else if(found_ptr->status != RUNNING)                                                       /* deals with the case where head is not ready */
          {
             purge_ready_helper(&block_ptr, &quit_ptr, &ready_ptr, &zapped_ptr, prev_ptr);
             ReadyList[i] = prev_ptr->next_proc_ptr;
          }
+         else
+            return;
       }
    }
 
@@ -836,6 +891,9 @@ static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc
       case QUIT   : helper_temp = *q_t;
                     if (*q_t == NULL)
                        *q_t = found;
+                    break;
+
+      case RUNNING: console("in default:  %d\n", found->status);
                     break;
    }
 
