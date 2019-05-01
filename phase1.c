@@ -7,33 +7,34 @@
  *----------------------------------------------------------------*/
 
 
+
 /*================================================================*
  *    Include Statements                                          *
  *================================================================*/
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <usloss.h>
 
 #include <phase1.h>
 #include "kernel.h"
 
-
 /*================================================================*
  *    Constant Declarations                                       *
  *================================================================*/
-#define UNUSED  -1                                                  /* default status */
+
 #define RUNNING 0                                                   /* max of one process can have this status */
 #define READY   1                                                   /* starting status of processes */
 #define BLOCKED 2                                                   /* status of blocked process */
 #define ZAPPED  3                                                   /* status of zapped process, not yet quit */
-#define QUIT    4                                                   /* status of quit process not yet joined */
+#define QUIT    4
+#define FINISHED 5
+#define UNUSED -1
+#define TIMESLICE 80000
 
 #define TRUE    1
 #define FALSE   0
 
-#define DEBUG   1
-
+#define DEBUG FALSE
 
 /*================================================================*
  *    Function Prototypes                                         *
@@ -42,28 +43,26 @@ int sentinel(void *);
 extern int start1(void *);
 void dispatcher(void);
 void launch();
+void dump_processes();
 
 static void check_kernel_mode(char *caller_name);
 static void enable_interrupts(char* caller_name);
 static void disable_interrupts(char* caller_name);
 
 static void check_deadlock();
-
-static void update_lists(char *caller_name);
-static void update_list_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found);
-
-void dump_processes(void);
-int get_pid(void);
-int readtime(void);
-
 int zap(int pid);
 int is_zapped(void);
 
-/*For future functionality */
-int block_me(int new_status);
-int unblock_proc(int pid);
+proc_ptr find_process(int pid);
+
+void clockHandler(int dev, int unit);
 int read_cur_start_time(void);
 void time_slice(void);
+
+
+static void purge_ready(char *caller_name);
+static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found);
+
 
 
 /*================================================================*
@@ -78,8 +77,11 @@ proc_struct ProcTable[MAXPROC];
 /* Process Lists  */
 proc_ptr BlockedList;                                               /* blocked processes */
 proc_ptr QuitList;                                                  /* quit processes, not yet joined */
-proc_ptr ReadyList[MINPRIORITY - MAXPRIORITY + 1];                  /* ready processes */
+proc_ptr ReadyList[SENTINELPRIORITY + 1];                           /* ready processes */
 proc_ptr ZappedList;                                                /* zapped processes, not yet quit */
+
+/* Number of Processes */
+int NumProc;
 
 /* Current Process ID */
 proc_ptr Current;
@@ -87,9 +89,12 @@ proc_ptr Current;
 /* Next Process ID to be Assigned */
 unsigned int next_pid = SENTINELPID;
 
+
+
 /*================================================================*
  *    Functions                                                   *
  *================================================================*/
+
 
 
 /*----------------------------------------------------------------*
@@ -116,25 +121,25 @@ void startup()
       ProcTable[i].next_sibling_ptr = NULL;
    }
 
+ /* initializes the Process Number */
+   NumProc = 0;
+
  /* initialize all Process Lists */
    if (DEBUG && debugflag)
       console(" - startup(): initializing the blocked, quit, ready, and zapped lists -\n");
    BlockedList = NULL;
    QuitList = NULL;
-   for (i = MAXPRIORITY; i < MINPRIORITY; i++)
+   for (i = MAXPRIORITY; i <= SENTINELPRIORITY; i++)
       ReadyList[i] = NULL;
    ZappedList = NULL;
 
  /* initialize the Clock Interrupt Handler */
- //Int_vec[CLOCK_INT] = clockHandler;
+   int_vec[CLOCK_INT] = clockHandler;
 
  /* startup a sentinel process */
    if (DEBUG && debugflag)
        console(" - startup(): calling fork1() for sentinel -\n");
-
    result = fork1("sentinel", sentinel, NULL, USLOSS_MIN_STACK, SENTINELPRIORITY);
-
-   console("%d\n", result);
    if (result < 0)
    {
       if (DEBUG && debugflag)
@@ -145,26 +150,21 @@ void startup()
  /* start the test process */
    if (DEBUG && debugflag)
       console(" - startup(): calling fork1() for start1 -\n");
-
    result = fork1("start1", start1, NULL, 2 * USLOSS_MIN_STACK, 1);
-
    if (result < 0)
    {
       console(" - startup(): fork1 for start1 returned an error, halting... -\n");
       halt(1);
    }
-   else
-   {
-       console("%d\n", result);
-   }
-   //console("\nBefore Dispatcher\n");
+
    dispatcher();
 
    console(" - startup(): Should not see this message! -\n");
    console(" - Returned from fork1 call that created start1 -\n");
 
-   return;
+   return ;
 }/* startup */
+
 
 
 /*----------------------------------------------------------------*
@@ -208,7 +208,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
     /* enable interrupts */
       enable_interrupts("fork1");
       console(" - fork1(): stack size is too small -\n");
-      return -2;
+      return (-2);
    }
 
  /* return if no empty slots in the process table, or priority is
@@ -218,7 +218,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
     /* enable interrupts */
       enable_interrupts("fork1");
       console(" - fork1(): process table is full -\n");
-      return -1;
+      return (-1);
    }
 
    if (strcmp(name, "sentinel") )                                   /* checks if process is sentinel */
@@ -228,7 +228,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
        /* enable interrupts */
          enable_interrupts("fork1");
          console(" - fork1(): priority out of range -\n");
-         return -1;
+         return (-1);
       }
    }
 
@@ -237,7 +237,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
     /* enable interrupts */
       enable_interrupts("fork1");
       console(" - fork1(): null function passed -\n");
-      return -1;
+      return (-1);
    }
 
    if (name == NULL)                                                /* checks if process name is NULL */
@@ -245,7 +245,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
     /* enable interrupts */
       enable_interrupts("fork1");
       console(" - fork1(): null process name passed -\n");
-      return -1;
+      return (-1);
    }
 
  /* fill-in entry in process table */
@@ -273,45 +273,61 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    ProcTable[proc_slot].pid = next_pid;                             /* stores the process id */
    next_pid += 1;                                                   /* increments the next_pid */
 
+   if(Current != NULL)                                              /* stores the parent process id */
+      ProcTable[proc_slot].parent_pid = Current->pid;
+   else
+      ProcTable[proc_slot].parent_pid = 0;
+
+   ProcTable[proc_slot].num_child  = 0;
+
    ProcTable[proc_slot].status = READY;                             /* sets the process status to ready */
 
    ProcTable[proc_slot].priority = priority;                        /* sets the process priority */
 
    ProcTable[proc_slot].stack = (char *)(malloc (stacksize) );      /* allocates and stores the stack */
 
-   ProcTable[proc_slot].cur_startTime = sys_clock();
  /* initialize context for this process, but use launch function
   * pointer for the initial value of the process's program
   * counter (PC) */
    context_init(&(ProcTable[proc_slot].state), psr_get(), ProcTable[proc_slot].stack, ProcTable[proc_slot].stacksize, launch);
-   //launch();
+
  /* updates the ReadyList */
    ready_temp = ReadyList[priority];
 
-   if (ReadyList[priority] == NULL)                                 /* deals with an empty priority level */
+   if (ReadyList[priority] == NULL)                                 /* deals with an empty List */
    {
       ReadyList[priority] = &ProcTable[proc_slot];
-      ReadyList[priority]->next_proc_ptr = NULL;
    }
-   else                                                             /* deals with an non empty priority level */
+   else                                                             /* deals with an non empty List */
    {
-      while (ready_temp->next_proc_ptr != NULL)
+      while (ready_temp != NULL)
          ready_temp = ready_temp->next_proc_ptr;
-
-      ready_temp->next_proc_ptr = &ProcTable[proc_slot];
+      ready_temp = &ProcTable[proc_slot];
    }
-   Current = &ProcTable[proc_slot]; //Added this. Not sure if correct
+
+ /* updates Current */
+   if (Current != NULL)
+   {
+      Current->child_proc_ptr = &ProcTable[proc_slot];
+      Current->num_child += 1;
+   }
+
  /* for future phase(s) */
    p1_fork(ProcTable[proc_slot].pid);
 
  /* calls dispatcher if not sentinel */
-   if (strcmp("sentinel", name) != 0)
+   if (strcmp(name, "sentinel") )
       dispatcher();
 
  /* enable interrupts */
    enable_interrupts("fork1");
+
+ /* updates Process Number */
+   NumProc += 1;
+
    return (ProcTable[proc_slot].pid);
 }/* fork1 */
+
 
 
 /*----------------------------------------------------------------*
@@ -332,19 +348,22 @@ int join(int *code)
    int child_pid = -1;
    proc_ptr join_temp;
 
+   if (DEBUG && debugflag)
+      console(" - join(): called -\n");
+
  /* test if in kernel mode, halts otherwise */
    check_kernel_mode("join");
 
  /* disbale interrupts */
    disable_interrupts("join");
 
- /* check if current process has no children */
-   if (Current->child_proc_ptr == NULL)
+ /* check if current process has children */
+   if (!Current->num_child)
    {
     /* enable interrupts */
       enable_interrupts("join");
       console(" - join(): current process has no children -\n");
-      return -2;
+      return (-2);
    }
 
  /* check if current process has been zapped */
@@ -353,16 +372,18 @@ int join(int *code)
     /* enable interrupts */
       enable_interrupts("join");
       console(" - join(): current process has been zapped -\n");
-      return -1;
+      return (-1);
    }
 
- /* check if current process has children that in QuitList */
-   join_temp = Current->child_proc_ptr;
+ /* check if current process has children in QuitList */
+
+   //join_temp = Current->child_proc_ptr;
    while (child_pid == -1)                                          /* sets up loop to check for child forever */
    {
+      join_temp = Current->child_proc_ptr;
       while (join_temp != NULL)                                     /* checks if any child has quit */
       {
-         if(join_temp->status = QUIT)
+         if(join_temp->status == QUIT)
             child_pid = join_temp->pid;
          join_temp = join_temp->next_sibling_ptr;
       }
@@ -372,11 +393,15 @@ int join(int *code)
          dispatcher();
       }
    }
+
+ /* stores passed quit code */
+   *code = find_process(child_pid)->quit_code;
+
  /* enable interrupts */
    enable_interrupts("join");
-
-   return 0;
+   return child_pid;
 }/* join */
+
 
 
 /*----------------------------------------------------------------*
@@ -402,7 +427,7 @@ void quit(int status)
    disable_interrupts("quit");
 
  /* checks if current process has any children */
-   if (Current->child_proc_ptr != NULL)
+   if (Current->num_child != 0)
    {
       console(" - quit(): current process has children and cannot quit. Halting... -\n");
       halt(1);
@@ -411,12 +436,24 @@ void quit(int status)
  /* sets status of current process to quit */
    Current->status = QUIT;
 
+ /* deals with the parent process */
+   if (Current->parent_pid)
+   {
+      proc_ptr parent_ptr = find_process(Current->parent_pid);
+      parent_ptr->num_child -= 1;
+   }
+
  /* for future phase(s) */
    p1_quit(Current->pid);
 
  /* enable interrupts */
    enable_interrupts("quit");
+
+ /* goes to dispatcher to decide who runs next */
+   dispatcher();
+
 }/* quit */
+
 
 
 /*----------------------------------------------------------------*
@@ -425,14 +462,13 @@ void quit(int status)
  * Parameters  : none                                             *
  * Returns     : nothing                                          *
  * Side Effects: none                                             *
- *               status list.                                     *
  *----------------------------------------------------------------*/
 void finish()
 {
-    check_kernel_mode("finish");
    if (DEBUG && debugflag)
       console(" - in finish... -\n");
 }/* finish */
+
 
 
 /*----------------------------------------------------------------*
@@ -454,8 +490,8 @@ int sentinel (void *unused)
       check_deadlock();
       waitint();
    }
-   halt(0);
 }/* sentinel */
+
 
 
 /*----------------------------------------------------------------*
@@ -471,23 +507,24 @@ static void check_deadlock()
     int numReady = 0;
     int numActive = 0;
 
-    for(int i = 0; i < MAXPROC; i++)
-    {
-        if(ProcTable[i].status == READY)
-        {
-            numReady++;
-            numActive++;
-        }
+ /* loops through Process Table */
+   for(int i = 1; i < MAXPROC; i++)
+   {
+      if(ProcTable[i].status == READY)
+      {                                                             /* increments both since Ready are always active */
+         numReady++;
+         numActive++;
+      }
 
-        if(ProcTable[i].status == BLOCKED || ProcTable[i].status == ZAPPED)
-        {
-            numActive++;
-        }
-    }
+      if(ProcTable[i].status == BLOCKED || ProcTable[i].status == ZAPPED)
+      {                                                             /* only increments active since not ready */
+         numActive++;
+      }
+   }
 
     if(numReady == 1)
     {
-        if(numActive == 1)
+        if(numActive >= 1)
         {
             console("All Processes have been completed.\n");
             halt(0);
@@ -498,9 +535,11 @@ static void check_deadlock()
             console("checkdeadlock(): processes still present. Halting...\n");
             halt(1);
         }
-        return;
     }
+    else
+        return;
 }/* check_deadlock */
+
 
 
 /*----------------------------------------------------------------*
@@ -521,15 +560,15 @@ void launch()
  /* enable interrupts */
    enable_interrupts("launch");
 
-console("here1\n");
  /* call the function passed to fork1, and capture its return value */
    result = Current->start_func(Current->start_arg);
-console("here2\n");
+
    if (DEBUG && debugflag)
       console(" - Process %d returned to launch -\n", Current->pid);
 
    quit(result);
 }/* launch */
+
 
 
 /*----------------------------------------------------------------*
@@ -541,124 +580,266 @@ console("here2\n");
  * Returns     : nothing                                          *
  * Side Effects: the context of the machine is changed            *
  *----------------------------------------------------------------*/
- void dispatcher(void)
- {
-    proc_ptr next_process = NULL;
-    proc_ptr disp_temp = NULL;
-    int i = MAXPRIORITY;
+void dispatcher(void)
+{
+   proc_ptr next_process = NULL;
+   proc_ptr prev_process = NULL;
+   proc_ptr disp_temp = NULL;
+   int i = MAXPRIORITY;
 
-    if (DEBUG && debugflag)
-       console(" - dispatcher(): called -\n");
+   if (DEBUG && debugflag)
+      console(" - dispatcher(): called -\n");
 
-  /* test if in kernel mode, halts otherwise */
-    check_kernel_mode("dispatcher");
+ /* test if in kernel mode, halts otherwise */
+   check_kernel_mode("dispatcher");
 
-  /* disable interrupts */
-    disable_interrupts("dispatcher");
+ /* disbale interrupts */
+   disable_interrupts("dispatcher");
 
-    update_lists("dispatcher");
+   purge_ready("dispatcher");
 
-    if(Current->status == RUNNING)
-    {
-        Current->status = READY;
+   if (DEBUG && debugflag)
+      dump_processes();
 
-    }
-  /* sets next_process to next highest priority process */
-    while ( (i <= MINPRIORITY) && (next_process == NULL) )
-    {
-       disp_temp = ReadyList[i];
-       while ( (disp_temp != NULL) && (next_process == NULL))
-          next_process = disp_temp;
-    }
+ /* sets next_process to next highest priority process */
+   while ( (i <= MINPRIORITY) && (next_process == NULL) )
+   {
+      disp_temp = ReadyList[i];
+      while ( (disp_temp != NULL) && (next_process == NULL))
+      {
+         next_process = disp_temp;
+         disp_temp = disp_temp->next_proc_ptr;
+      }
+      i += 1;
+   }
 
-  /* context switch to next process */
-    if (Current == NULL)                                             /* First time Current is NULL */
-    {
-     /* for future phase(s) */
-       p1_switch(0, next_process->pid);
-       Current = next_process;
-       context_switch( NULL, &next_process->state);
-    }
+   if (next_process == NULL)
+   {
+      if (BlockedList != NULL)
+      {
+         BlockedList->status = READY;
+         next_process = BlockedList;
+         //next_process->status = READY;
+         BlockedList = BlockedList->next_proc_ptr;
 
-    else                                                             /* All other times Current is defined */
-    {
-     /* for future phase(s) */
-       p1_switch(Current->pid, next_process->pid);
-       disp_temp = Current;
-       Current = next_process;
-    }
+       /* updates the ReadyList */
+         disp_temp = ReadyList[next_process->priority];
 
-    if(disp_temp != Current)
-    {
-        if(disp_temp->pid > -1)
-            disp_temp->CPUTime += sys_clock() - disp_temp->cur_startTime;
-        //Current->time_slice
-        Current->cur_startTime = sys_clock();
-    }
+         if (ReadyList[next_process->priority] == NULL)                                 /* deals with an empty List */
+            {
+               ReadyList[next_process->priority] = next_process;
+            }
+         else                                                             /* deals with an non empty List */
+            {
+               while (disp_temp != NULL)
+                  disp_temp = disp_temp->next_proc_ptr;
+               disp_temp = next_process;
+            }
 
-  /* enable interrupts */
-  enable_interrupts("dispatcher");
-  context_switch( &disp_temp->state, &Current->state);
- } /* dispatcher */
+      }
+      else
+         next_process = &ProcTable[1];
+
+   }
+
+   if (DEBUG && debugflag)
+      dump_processes();
+
+ /* context switch to next process */
+   if (Current == NULL)                                             /* First time Current is NULL */
+   {
+    /* for future phase(s) */
+      p1_switch(0, next_process->pid);
+      Current = next_process;
+      context_switch( NULL, &next_process->state);
+   }
+
+   else                                                             /* All other times Current is defined */
+   {
+    /* for future phase(s) */
+      p1_switch(Current->pid, next_process->pid);
+      prev_process = Current;
+      Current = next_process;
+      context_switch( &prev_process->state, &Current->state);
+   }
+
+ /* enable interrupts */
+   enable_interrupts("dispatcher");
+
+} /* dispatcher */
+
 
 
 /*----------------------------------------------------------------*
- * Name        : update_lists                                     *
- * Purpose     : Updates all the process lists.                   *
- * Parameters  : name of calling function                         *
+ * Name        : dump_proces                                      *
+ * Purpose     : Displays the PID, ParentPID, Priority, Status,   *
+ *               # of Children, CPU Time Consumed, and Name of    *
+ *               of every process                                 *
+ * Parameters  : none                                             *
  * Returns     : nothing                                          *
  * Side Effects: the lists are all updated                        *
  *----------------------------------------------------------------*/
-static void update_lists(char *caller_name)
+void dump_processes()
 {
    if (DEBUG && debugflag)
-      console("    - update_lists(): called for function %s -\n", caller_name);
-   int i;
-   proc_ptr block_temp = NULL;
-   proc_ptr quit_temp = NULL;
-   proc_ptr ready_temp = NULL;
-   proc_ptr zapped_temp = NULL;
-   proc_ptr found_temp;
+      console("    - dump_processes(): called -\n");
 
-   for (i = MAXPRIORITY; i < MINPRIORITY; i++)
+   int i;
+   char* status[5] = {"RUNNING", "READY", "BLOCKED", "ZAPPED", "QUIT"};
+
+   if (DEBUG && debugflag)
+      console("    - dump_processes(): generating process list -\n");
+
+ /* loop to run through all processes */
+   if (NumProc >= 1)
    {
-      found_temp = ReadyList[i];
-      while (found_temp != NULL)
+      for (i = 1; i < MAXPROC; i++)
       {
-         if (found_temp->status != READY)
-            update_list_helper(&block_temp, &quit_temp, &ready_temp, &zapped_temp, found_temp);
-         found_temp = found_temp->next_proc_ptr;
+         if (ProcTable[i].pid != UNUSED)                             /* checks if process is used */
+         {
+            console("         +-------------------------------------------------------------------+\n");
+            console("         | Name         : %-50s |\n", ProcTable[i].name);
+            console("         | PID          : %-50d |\n", ProcTable[i].pid);
+            console("         | Parent PID   : %-50d |\n", ProcTable[i].parent_pid);
+            console("         | Priority     : %-50d |\n", ProcTable[i].priority);
+            console("         | Status       : %-50s |\n", status[ProcTable[i].status]);
+            console("         | # of Children: %-50d |\n", ProcTable[i].num_child);
+            console("         | CPU Time Used: Currently blank                                    |\n");
+         }
       }
+      console("         +-------------------------------------------------------------------+\n");
    }
-}/* update_lists */
+
+   console("         | Blocked %8p |\n", BlockedList);
+
+}/* dump_processes */
+
 
 
 /*----------------------------------------------------------------*
- * Name        : update_helper                                    *
- * Purpose     : Helper function to update_lists                  *
- * Parameters  : temp lists from update_lists and process to be   *
+ * Name        : purge_ready                                      *
+ * Purpose     : Removes all processes that aren't ready from the *
+ *               ready lists                                      *
+ * Parameters  : name of calling function                         *
+ * Returns     : nothing                                          *
+ * Side Effects: all lists updated                                *
+ *----------------------------------------------------------------*/
+static void purge_ready(char *caller_name)
+{
+   if (DEBUG && debugflag)
+      console("    - purge_ready(): called for function %s -\n", caller_name);
+   int i;
+   proc_ptr block_ptr = NULL;
+   proc_ptr quit_ptr = NULL;
+   proc_ptr ready_ptr = NULL;
+   proc_ptr zapped_ptr = NULL;
+   proc_ptr found_ptr = NULL;
+   proc_ptr prev_ptr;
+   proc_ptr temp_ptr;
+
+ /* loop to check through Ready List at each priority level */
+   for (i = MAXPRIORITY; i < MINPRIORITY; i++)
+   {
+      found_ptr = ReadyList[i];
+      if (found_ptr != NULL)                                        /* if the pointer is null skips it */
+      {
+         prev_ptr = found_ptr;
+         found_ptr = prev_ptr->next_proc_ptr;
+         if(prev_ptr->status == READY)                              /* checks if the list head is ready */
+         {
+            while (found_ptr != NULL)
+            {
+               if (found_ptr->status != READY)                      /* loops through all members and chekc if ready */
+               {
+                  purge_ready_helper(&block_ptr, &quit_ptr, &ready_ptr, &zapped_ptr, found_ptr);
+                  prev_ptr->next_proc_ptr = found_ptr->next_proc_ptr;
+                  found_ptr->next_proc_ptr = NULL;
+               }
+               prev_ptr = found_ptr;
+               found_ptr = prev_ptr->next_proc_ptr;
+            }
+         }
+         else                                                       /* deals with the case where head is not ready */
+         {
+            purge_ready_helper(&block_ptr, &quit_ptr, &ready_ptr, &zapped_ptr, prev_ptr);
+            ReadyList[i] = prev_ptr->next_proc_ptr;
+         }
+      }
+   }
+
+ /* stores blocked process in Blocked List */
+   temp_ptr = BlockedList;
+   if (BlockedList == NULL)
+      BlockedList = block_ptr;
+   else
+   {
+      while (temp_ptr != NULL)
+         temp_ptr = temp_ptr->next_proc_ptr;
+      temp_ptr = block_ptr;
+   }
+
+ /* stores blocked proces>s in Quit List */
+   temp_ptr = QuitList;
+   if (QuitList == NULL)
+      QuitList = block_ptr;
+   else
+   {
+      while (temp_ptr != NULL)
+         temp_ptr = temp_ptr->next_proc_ptr;
+      temp_ptr = block_ptr;
+   }
+
+/* stores blocked process in Zapped List */
+   temp_ptr = ZappedList;
+   if (ZappedList == NULL)
+      ZappedList = block_ptr;
+   else
+   {
+      while (temp_ptr != NULL)
+         temp_ptr = temp_ptr->next_proc_ptr;
+      temp_ptr = block_ptr;
+   }
+}/* purge_ready */
+
+
+
+/*----------------------------------------------------------------*
+ * Name        : purge_ready_helper                               *
+ * Purpose     : Helper function to purge_ready                   *
+ * Parameters  : temp lists from purge_ready and process to be    *
  *               added                                            *
  * Returns     : nothing                                          *
  * Side Effects: none                                             *
  *----------------------------------------------------------------*/
-static void update_list_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found)
+static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found)
 {
    if (DEBUG && debugflag)
-      console("       - update_lists_helper(): called -\n");
+      console("       - purge_ready_helper(): called -\n");
 
+ /* decides which list to add process to */
+   //int status = found->status;
    proc_ptr helper_temp;
    switch (found->status)
    {
       case READY  : helper_temp = *r_t;
+                    if (*r_t == NULL)
+                       *r_t = found;
                     break;
       case BLOCKED: helper_temp = *b_t;
+                    if (*b_t == NULL)
+                       *b_t = found;
                     break;
       case ZAPPED : helper_temp = *z_t;
+                    if (*z_t == NULL)
+                       *z_t = found;
                     break;
       case QUIT   : helper_temp = *q_t;
+                    if (*q_t == NULL)
+                       *q_t = found;
                     break;
    }
 
+ /* adds process to proper sublist */
    while(helper_temp != NULL)
       helper_temp = helper_temp->next_proc_ptr;
 
@@ -683,10 +864,11 @@ static void check_kernel_mode(char *caller_name)
    caller_psr.integer_part = psr_get();                             /* stores current psr values into structure */
    if (caller_psr.bits.cur_mode != 1)
    {
-      console("    - %s(): called while not in kernel mode, by process %d. Halting... -\n", caller_name, Current->pid);
+      console("       - %s(): called while not in kernel mode, by process %d. Halting... -\n", caller_name, Current->pid);
       halt(1);
    }
 }/* check_kernel_mode */
+
 
 
 /*----------------------------------------------------------------*
@@ -694,14 +876,16 @@ static void check_kernel_mode(char *caller_name)
  * Purpose     : Disables all interupts.                          *
  * Parameters  : name of calling function                         *
  * Returns     : nothing                                          *
- * Side Effects: halts process if in user mode, disables          *
- *               interupts                                        *
+ * Side Effects: disables interupts                               *
  *----------------------------------------------------------------*/
 void disable_interrupts(char *caller_name)
 {
    if (DEBUG && debugflag)
       console("    - disable_interrupts(): interupts turned off for %s -\n", caller_name);
+
+   psr_set( psr_get() & ~PSR_CURRENT_INT );
 }/* disable_interrupts */
+
 
 
 /*----------------------------------------------------------------*
@@ -709,59 +893,52 @@ void disable_interrupts(char *caller_name)
  * Purpose     : Enables all interupts.                           *
  * Parameters  : name of calling function                         *
  * Returns     : nothing                                          *
- * Side Effects: halts process if in user mode, enables interupts *
+ * Side Effects: enables interupts                                *
  *----------------------------------------------------------------*/
 void enable_interrupts(char *caller_name)
 {
-    check_kernel_mode("enable_interrupts");
-    psr_set(psr_get() || PSR_CURRENT_INT);
    if (DEBUG && debugflag)
       console("    - enable_interrupts(): interupts turned on for %s -\n", caller_name);
+
+   psr_set( psr_get() | PSR_CURRENT_INT );
 }/* enable_interrupts */
-void dump_processes()
-{
-    /*Prints process information to the console. For each PCB in the process table,
-    print it's PID, parent's PID, priority, process status, # of children,
-    CPU time consumed, and name. */
-    for(int i = 0; i < MAXPROC; i++)
-    {
-        if((ProcTable[i].pid) = UNUSED) //Process slot is unsused
-        {
-            console("There are currently no processes.\n");
-        }
-        console("Current Process name: %s\n", ProcTable[i].name);
-        console("Current Process PID: %s\n", ProcTable[i].pid);
-        //console("Current Process Parent PID: %s", ProcTable[i]->);
-        console("Current Process Priority: %s \n", ProcTable[i].priority);
-        console("Current Process Status: %s\n", ProcTable[i].status);
-        console("Current Process Number of Children: %s\n", ProcTable[i].numChildren);
-        console("Current Process CPU Time: %d\n", readtime);
-    }
-
-}
-int get_pid()
-{
-    //Return process ID of currently running proccess
-    return Current->pid;
-}
-
-int readtime()
-{
-    check_kernel_mode("readtime");
-    return Current->CPUTime/1000;
-}
 
 
-int block_me(int new_status)
+
+/*----------------------------------------------------------------*
+ * Name        : find_process                                     *
+ * Purpose     : Finds process pointer of given PID               *
+ * Parameters  : PID to find                                      *
+ * Returns     : pointer of found process -or-                    *
+ *               NULL if none match                               *
+ * Side Effects: none                                             *
+ *----------------------------------------------------------------*/
+proc_ptr find_process(int pid)
 {
-    /*Blocks the calling process. Returns -1 if process was zapped while Blocked
-    Returns 0 otherwise. */
-    if(is_zapped())
-    {
-        return -1;
-    }
-    return 0;
-}
+   if (DEBUG && debugflag)
+      console("       - find_process(): seeking process %d -\n", pid);
+
+   int i = 1;
+   proc_ptr found_ptr = NULL;
+
+   while ( (i < MAXPROC) && (found_ptr == NULL) )
+   {
+      if (ProcTable[i].pid == pid)
+         found_ptr = &ProcTable[i];
+      i += 1;
+   }
+
+   return(found_ptr);
+}/* find_process */
+
+void clockHandler(int dev, int unit)
+{
+    static int count = 0; // count how many times the clock handler is called
+    count++;
+    if (DEBUG && debugflag)
+        console("clockhandler called %d times\n", count);
+    time_slice();
+} /* clockHandler */
 
 int zap(int pid)
 {
@@ -769,7 +946,6 @@ int zap(int pid)
     {
         console("Process cannot zap itself! Halting.\n");
         halt(1);
-        return -1;
     }
     for(int i = 0; i < MAXPROC; i++)
     {
@@ -792,18 +968,7 @@ int is_zapped()
     return 0;
 }
 
-int unblock_proc(int pid)
-{
-    /*Unblocks the process with pid that had been previously blocked via block_me()
-    The status of the process is changed to READY and is put on the Ready list
-    Dispatcher will be called as a side effect.
-    Returns -2 if process was not blocked, does not existm is the current process,
-        or is blocked on a status less than or equal to 10.
-    Returns -1 if the calling process was zapped.
-    Returns 0 otherwise. */
 
-    return 0;
-}
 int read_cur_start_time()
 {
     /*Returns the time in microseconds at which the currently executing process
@@ -821,4 +986,5 @@ void time_slice()
         has exceeded its time slice*/
     }
 }
+
 //fish
