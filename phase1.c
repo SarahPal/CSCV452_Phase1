@@ -47,6 +47,9 @@ void time_slice(void);
 
 void empty_proc(int pid);
 
+int block_me(int block_status);
+int unblock_proc(int pid);
+
 static void purge_ready(char *caller_name);
 static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found);
 
@@ -1023,6 +1026,55 @@ void empty_proc(int pid)
 
     NumProc--;
     enable_interrupts("empty_proc");
+}
+
+int block_me(int block_status)
+{
+    if(DEBUG && debugflag)
+        console("- block(): entering the block_me function\n");
+
+    check_kernel_mode("block_me");
+    disable_interrupts("block_me");
+
+    if(block_status < 10)
+    {
+        if(DEBUG && debugflag)
+            console("   - block(): Invalid block status. Halting\n");
+            halt(1);
+    }
+
+    Current->status = block_status;
+    if(block_status < 10)
+    {
+        if(DEBUG && debugflag)
+            console("   - block(): Invalid block status. Halting\n");
+        halt(1);
+    }
+    if(Current->status == ZAPPED)
+    {
+        return -1;
+    }
+
+    enable_interrupts("block_me");
+    return 0;
+}
+int unblock_proc(int pid)
+{
+    if(DEBUG && debugflag)
+        console("- unblock_proc(): entering the unblock_proc function.\n");
+
+    check_kernel_mode("unblock_proc");
+    disable_interrupts("ublock_proc");
+
+    int i = pid%MAXPROC;
+    if(Current->pid == pid)
+        return -2;
+
+    ProcTable[i].status = READY;
+    ReadyList[ProcTable[i].priority--] = &ProcTable[i];
+    dispatcher();
+
+    return 0;
 }
 
 //fish
