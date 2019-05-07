@@ -45,6 +45,7 @@ void clockHandler(int dev, int unit);
 int read_cur_start_time(void);
 void time_slice(void);
 
+void empty_proc(int pid);
 
 static void purge_ready(char *caller_name);
 static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc_ptr *z_t, proc_ptr found);
@@ -55,7 +56,7 @@ static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc
  *    Global Variable Declarations                                *
  *================================================================*/
 /* Patrick's Debugging Global Variable... */
-int debugflag = 0;
+int debugflag = 1;
 
 /* Process Table */
 proc_struct ProcTable[MAXPROC];
@@ -116,7 +117,9 @@ void startup()
    BlockedList = NULL;
    QuitList = NULL;
    for (i = MAXPRIORITY; i <= SENTINELPRIORITY; i++)
-      ReadyList[i] = NULL;
+   {
+       ReadyList[i] = NULL;
+   }
    ZappedList = NULL;
 
  /* initialize the Clock Interrupt Handler */
@@ -193,7 +196,8 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    {
     /* enable interrupts */
       enable_interrupts("fork1");
-      console(" - fork1(): stack size is too small -\n");
+      if(DEBUG && debugflag)
+        console(" - fork1(): stack size is too small -\n");
       return (-2);
    }
 
@@ -203,7 +207,8 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    {
     /* enable interrupts */
       enable_interrupts("fork1");
-      console(" - fork1(): process table is full -\n");
+      if(DEBUG && debugflag)
+        console(" - fork1(): process table is full -\n");
       return (-1);
    }
 
@@ -213,7 +218,8 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
       {
        /* enable interrupts */
          enable_interrupts("fork1");
-         console(" - fork1(): priority out of range -\n");
+         if(DEBUG && debugflag)
+            console(" - fork1(): priority out of range -\n");
          return (-1);
       }
    }
@@ -222,7 +228,8 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    {
     /* enable interrupts */
       enable_interrupts("fork1");
-      console(" - fork1(): null function passed -\n");
+      if(DEBUG && debugflag)
+        console(" - fork1(): null function passed -\n");
       return (-1);
    }
 
@@ -230,14 +237,16 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    {
     /* enable interrupts */
       enable_interrupts("fork1");
-      console(" - fork1(): null process name passed -\n");
+      if(DEBUG && debugflag)
+        console(" - fork1(): null process name passed -\n");
       return (-1);
    }
 
  /* fill-in entry in process table */
    if (strlen(name) >= (MAXNAME - 1) )                              /* checks if the process name is too long */
    {
-      console(" - fork1(): process name is too long.  Halting... -\n");
+       if(DEBUG && debugflag)
+            console(" - fork1(): process name is too long.  Halting... -\n");
       halt(1);
    }
    strcpy(ProcTable[proc_slot].name, name);                         /* stores the process name */
@@ -248,7 +257,8 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
       ProcTable[proc_slot].start_arg[0] = '\0';
    else if (strlen(arg) >= (MAXARG - 1) )                           /* checks if the function argument is too long */
    {
-      console(" - fork1(): argument too long.  Halting... -\n");
+       if(DEBUG && debugflag)
+            console(" - fork1(): argument too long.  Halting... -\n");
       halt(1);
    }
    else
@@ -302,7 +312,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
    p1_fork(ProcTable[proc_slot].pid);
 
  /* calls dispatcher if not sentinel */
-   if (strcmp(name, "sentinel") )
+   if (strcmp(name, "sentinel"))
       dispatcher();
 
  /* enable interrupts */
@@ -331,6 +341,7 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
  *----------------------------------------------------------------*/
 int join(int *code)
 {
+    console("join called\n");
    int child_pid = -1;
    proc_ptr join_temp;
 
@@ -363,32 +374,41 @@ int join(int *code)
       return (-1);
    }
 
+   console("%d\n", Current->pid);
  /* check if current process has children in QuitList */
+    if(Current->status == QUIT)
+    {
+        console("Current status set to quit");
+        child_pid = Current->pid;
+    }
 
    //join_temp = Current->child_proc_ptr;
-   while (child_pid == -1)                                          /* sets up loop to check for child forever */
+   while (child_pid == -1)
    {
       join_temp = Current->child_proc_ptr;
-      while (join_temp != NULL)                                     /* checks if any child has quit */
+      while (join_temp != NULL)
       {
          if(join_temp->status == QUIT)
-            child_pid = join_temp->pid;
+         {
+             console("here\n");
+             child_pid = join_temp->pid;
+         }
          join_temp = join_temp->next_sibling_ptr;
       }
-      if (child_pid == -1)                                          /* if no child has quit blocks process and calls dispatcher */
+      if (child_pid == -1)
       {
          Current->status = BLOCKED;
          dispatcher();
       }
-   }
+  }
+
 
  /* stores passed quit code */
    *code = find_process(child_pid)->quit_code;
 
-   console("quit code: %d\n", code);
-
  /* enable interrupts */
    enable_interrupts("join");
+   console("returning from join\n");
    return child_pid;
 }/* join */
 
@@ -424,23 +444,27 @@ void quit(int status)
    }
 
  /* sets status of current process to quit */
+
    Current->status = QUIT;
    Current->quit_code = status;
-   QuitList = Current;
    ReadyList[Current->priority--] = NULL;
    Current->quit_code = status;
-   console("%d\n", Current->quit_code);
 
  /* deals with the parent process */
    if (Current->parent_pid)
    {
       proc_ptr parent_ptr = find_process(Current->parent_pid);
       parent_ptr->num_child--;
+      parent_ptr->status = READY;
+      //parent_ptr->child_proc_ptr = NULL;
+      //empty_proc(parent_ptr->child_proc_ptr);
    }
-
+   else
+   {
+       empty_proc(Current->pid);
+   }
  /* for future phase(s) */
    p1_quit(Current->pid);
-
  /* enable interrupts */
    enable_interrupts("quit");
 
@@ -549,17 +573,21 @@ void launch()
 {
    int result;
 
+
    if (DEBUG && debugflag)
       console(" - launch(): started -\n");
+
+      check_kernel_mode("launch");
+      disable_interrupts("launch");
 
  /* enable interrupts */
    enable_interrupts("launch");
 
- /* call the function passed to fork1, and capture its return value */
-   result = Current->start_func(Current->start_arg);
-
    if (DEBUG && debugflag)
       console(" - Process %d returned to launch -\n", Current->pid);
+
+ /* call the function passed to fork1, and capture its return value */
+   result = Current->start_func(Current->start_arg);
 
    quit(result);
 }/* launch */
@@ -593,7 +621,7 @@ void dispatcher(void)
 
    purge_ready("dispatcher");
 
-   if (DEBUG && debugflag)
+   /*if (DEBUG && debugflag)
       dump_processes();
 
  /* sets next_process to next highest priority process */
@@ -647,16 +675,16 @@ void dispatcher(void)
       context_switch( NULL, &next_process->state);
    }
 
-   else                                                             /* All other times Current is defined */
-   {
     /* for future phase(s) */
-      p1_switch(Current->pid, next_process->pid);
-      prev_process = Current;
-      Current = next_process;
-      enable_interrupts("dispatcher");
-      context_switch( &prev_process->state, &Current->state);
-   }
+  p1_switch(Current->pid, next_process->pid);
+  prev_process = Current;
+  Current = next_process;
+  Current->cur_startTime = sys_clock();
 
+  enable_interrupts("dispatcher");
+   context_switch( &prev_process->state, &Current->state);
+
+   //Current->status = RUNNING;
  /* enable interrupts */
    enable_interrupts("dispatcher");
 
@@ -780,8 +808,8 @@ static void purge_ready(char *caller_name)
    {
       while (temp_ptr != NULL)
          temp_ptr = temp_ptr->next_proc_ptr;
-      temp_ptr = block_ptr;
-   }
+     temp_ptr = block_ptr;
+    }
 
 /* stores blocked process in Zapped List */
    temp_ptr = ZappedList;
@@ -927,10 +955,8 @@ proc_ptr find_process(int pid)
 
 void clockHandler(int dev, int unit)
 {
-    static int count = 0; // count how many times the clock handler is called
-    count++;
-    if (DEBUG && debugflag)
-        console("clockhandler called %d times\n", count);
+    if(DEBUG && debugflag)
+        console("    - clockHandler(): ClockHandler called\n");
     time_slice();
 } /* clockHandler */
 
@@ -972,13 +998,31 @@ int read_cur_start_time()
 
 void time_slice()
 {
+    disable_interrupts("time_slice");
     int run_time = sys_clock() - read_cur_start_time();
 
     if(run_time >= TIMESLICE)
     {
+        Current->sliceTime = 0;
         dispatcher();/*Calls dispatcher if currently executing process
         has exceeded its time slice*/
     }
+}
+
+void empty_proc(int pid)
+{
+    check_kernel_mode("empty_proc");
+    disable_interrupts("empty_proc");
+    int i = pid %MAXPROC;
+
+    ProcTable[i].pid = UNUSED;
+    ProcTable[i].status = UNUSED;
+    ProcTable[i].next_proc_ptr = NULL;
+    ProcTable[i].child_proc_ptr = NULL;
+    ProcTable[i].next_sibling_ptr = NULL;
+
+    NumProc--;
+    enable_interrupts("empty_proc");
 }
 
 //fish
