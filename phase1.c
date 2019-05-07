@@ -56,7 +56,7 @@ static void purge_ready_helper(proc_ptr *b_t, proc_ptr *q_t, proc_ptr *r_t, proc
  *    Global Variable Declarations                                *
  *================================================================*/
 /* Patrick's Debugging Global Variable... */
-int debugflag = 1;
+int debugflag = 0;
 
 /* Process Table */
 proc_struct ProcTable[MAXPROC];
@@ -154,7 +154,10 @@ void startup()
    return ;
 }/* startup */
 
-
+int getpid()
+{
+    return Current->pid;
+}
 
 /*----------------------------------------------------------------*
  * Name        : fork1                                            *
@@ -341,7 +344,6 @@ int fork1(char *name, int(*func)(char *), char *arg, int stacksize, int priority
  *----------------------------------------------------------------*/
 int join(int *code)
 {
-    console("join called\n");
    int child_pid = -1;
    proc_ptr join_temp;
 
@@ -374,7 +376,6 @@ int join(int *code)
       return (-1);
    }
 
-   console("%d\n", Current->pid);
  /* check if current process has children in QuitList */
     if(Current->status == QUIT)
     {
@@ -390,7 +391,6 @@ int join(int *code)
       {
          if(join_temp->status == QUIT)
          {
-             console("here\n");
              child_pid = join_temp->pid;
          }
          join_temp = join_temp->next_sibling_ptr;
@@ -408,7 +408,6 @@ int join(int *code)
 
  /* enable interrupts */
    enable_interrupts("join");
-   console("returning from join\n");
    return child_pid;
 }/* join */
 
@@ -439,7 +438,8 @@ void quit(int status)
  /* checks if current process has any children */
    if (Current->num_child != 0)
    {
-      console(" - quit(): current process has children and cannot quit. Halting... -\n");
+       if(DEBUG && debugflag)
+            console(" - quit(): current process has children and cannot quit. Halting... -\n");
       halt(1);
    }
 
@@ -707,7 +707,7 @@ void dump_processes()
       console("    - dump_processes(): called -\n");
 
    int i;
-   char* status[5] = {"RUNNING", "READY", "BLOCKED", "ZAPPED", "QUIT"};
+   char* status[8] = {"\0","RUNNING", "READY", "BLOCKED", "ZAPPED", "QUIT", "ZAP_BLOCK", "JOIN_BLOCK"};
 
    if (DEBUG && debugflag)
       console("    - dump_processes(): generating process list -\n");
