@@ -978,8 +978,8 @@ int zap(int pid)
             return 0;
         }
     }
-    console("Process does not exist\n");
-    return -1;
+    console("Process does not exist. Halting...\n");
+    halt(1);
 }
 
 int is_zapped()
